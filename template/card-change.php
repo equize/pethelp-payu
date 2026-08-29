@@ -112,7 +112,7 @@ body {
 
         <div id="cc-error" class="cc-error" style="<?php echo $error ? '' : 'display:none;'; ?>"><?php echo esc_html( $error ); ?></div>
 
-        <form method="post" id="cc-form" action="<?php echo esc_url( Pethelp_PayU_Card_Change_Page::get_url( $subscription->get_id() ) ); ?>">
+        <form method="post" id="cc-form" action="<?php echo esc_url( Pethelp_PayU_Card_Change_Page::get_url( $subscription->get_id(), $redirect ?? null ) ); ?>">
             <input type="hidden" name="pethelp-payu-change-card" value="1" />
             <input type="hidden" name="subscription_id" value="<?php echo (int) $subscription->get_id(); ?>" />
             <input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'pethelp_payu_change_card_' . $subscription->get_id() ) ); ?>" />
@@ -123,13 +123,21 @@ body {
                     <label class="cc-option">
                         <input type="radio" name="cc_choice" value="existing:<?php echo (int) $token['id']; ?>" />
                         <div>
-                            <span class="cc-masked"><?php echo esc_html( $token['masked_card'] ?: '••••' ); ?></span>
-                            <?php if ( $token['exp_month'] && $token['exp_year'] ) : ?>
-                                <div class="cc-meta">
+                            <span class="cc-masked">
+                                <?php echo esc_html( $token['masked_card'] ?: '••••' ); ?>
+                            </span>
+                            <div class="cc-meta">
+                                <?php if ( ! empty( $current_token['card_brand'] ) ) : ?>
+                                    <?php echo esc_html( $current_token['card_brand'] ); ?> 
+                                    <?php if ( $token['exp_month'] && $token['exp_year'] ) : ?>
+                                        -
+                                    <?php endif; ?>
+                                <?php endif; ?>
+                                <?php if ( $token['exp_month'] && $token['exp_year'] ) : ?>
                                     Data ważności:
                                     <?php echo esc_html( sprintf( '%02d/%d', $token['exp_month'], $token['exp_year'] ) ); ?>
-                                </div>
-                            <?php endif; ?>
+                                <?php endif; ?>
+                            </div>
                         </div>
                     </label>
                 <?php endforeach; ?>

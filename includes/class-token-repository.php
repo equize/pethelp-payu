@@ -99,9 +99,8 @@ class Pethelp_PayU_Token_Repository {
 
 	/**
 	 * @param array{type:string,value:string,masked_card:string} $widget_token
-	 * @param array $raw_response Full decoded widget callback JSON.
 	 */
-	public static function create_from_widget_response( int $user_id, array $widget_token, array $raw_response ): int {
+	public static function create_from_widget_response( int $user_id, array $widget_token ): int {
 		return self::create( [
 			'user_id'     => $user_id,
 			'payu_token'  => $widget_token['value'],
@@ -158,6 +157,83 @@ class Pethelp_PayU_Token_Repository {
 		return $rows ?: [];
 	}
 
+	/**
+	 * Paginated, filterable listing for the admin token-management screen.
+	 *
+	 * @param array{
+	 *     status?: string,
+	 *     search?: string,
+	 *     per_page?: int,
+	 *     paged?: int,
+	 *     orderby?: string,
+	 *     order?: string,
+	 * } $args
+	 * @return array<int,array>
+	 */
+	public static function query( array $args = [] ): array {
+		global $wpdb;
+
+		[ $where, $params ] = self::build_query_where( $args );
+
+		$allowed_orderby = [ 'id', 'user_id', 'status', 'exp_year', 'created_at', 'updated_at' ];
+		$orderby          = in_array( $args['orderby'] ?? '', $allowed_orderby, true ) ? $args['orderby'] : 'created_at';
+		$order            = strtoupper( $args['order'] ?? 'DESC' ) === 'ASC' ? 'ASC' : 'DESC';
+
+		$per_page = max( 1, (int) ( $args['per_page'] ?? 20 ) );
+		$paged    = max( 1, (int) ( $args['paged'] ?? 1 ) );
+		$offset   = ( $paged - 1 ) * $per_page;
+
+		$sql = 'SELECT * FROM ' . self::table_name() . " {$where} ORDER BY {$orderby} {$order} LIMIT %d OFFSET %d";
+
+		$rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( $params, [ $per_page, $offset ] ) ), ARRAY_A );
+
+		return $rows ?: [];
+	}
+
+	/**
+	 * @param array{status?: string, search?: string} $args Same filters as query().
+	 */
+	public static function count( array $args = [] ): int {
+		global $wpdb;
+
+		[ $where, $params ] = self::build_query_where( $args );
+
+		$sql = 'SELECT COUNT(*) FROM ' . self::table_name() . " {$where}";
+
+		if ( empty( $params ) ) {
+			return (int) $wpdb->get_var( $sql );
+		}
+
+		return (int) $wpdb->get_var( $wpdb->prepare( $sql, $params ) );
+	}
+
+	/**
+	 * @return array{0:string,1:array<int,mixed>} [$whereSql, $params]
+	 */
+	private static function build_query_where( array $args ): array {
+		global $wpdb;
+
+		$where  = [];
+		$params = [];
+
+		if ( ! empty( $args['status'] ) ) {
+			$where[]  = 'status = %s';
+			$params[] = $args['status'];
+		}
+
+		if ( ! empty( $args['search'] ) ) {
+			$like     = '%' . $wpdb->esc_like( $args['search'] ) . '%';
+			$where[]  = '( masked_card LIKE %s OR payu_token LIKE %s OR card_brand LIKE %s )';
+			$params[] = $like;
+			$params[] = $like;
+			$params[] = $like;
+		}
+
+		$sql = $where ? ( 'WHERE ' . implode( ' AND ', $where ) ) : '';
+
+		return [ $sql, $params ];
+	}
+
 	public static function update_status( int $token_id, string $status ): bool {
 		global $wpdb;
 
@@ -165,6 +241,31 @@ class Pethelp_PayU_Token_Repository {
 			self::table_name(),
 			[
 				'status'     => $status,
+				'updated_at' => current_time( 'mysql' ),
+			],
+			[ 'id' => $token_id ],
+			[ '%s', '%s' ],
+			[ '%d' ]
+		);
+		
+		if ( $updated !== false ) {
+			do_action( 'payu_token_status_changed', $token_id, $status );
+		}
+
+		return $updated !== false;
+	}
+
+	/**
+	 * Backfills/corrects the card brand on an existing token row (e.g. when
+	 * it wasn't available at creation time and is learned afterwards).
+	 */
+	public static function update_card_brand( int $token_id, string $card_brand ): bool {
+		global $wpdb;
+
+		$updated = $wpdb->update(
+			self::table_name(),
+			[
+				'card_brand' => $card_brand,
 				'updated_at' => current_time( 'mysql' ),
 			],
 			[ 'id' => $token_id ],
@@ -229,6 +330,12 @@ class Pethelp_PayU_Token_Repository {
 		$subscription->save();
 
 		self::refresh_scheduled_renewal_orders( $token_id, $subscription );
+
+		// Lets the scheduled-reminders framework (see wp-content/themes/petmedica/includes/reminders)
+		// (re)compute the card-expiry reminder schedule for this subscription –
+		// fired unconditionally (even on a no-op reassignment) so a schedule
+		// always exists/gets corrected, not just on an actual change.
+		do_action( 'payu_token_assigned_to_subscription', $subscription_id, $token_id );
 
 		if ( $previous_sub_id === $subscription_id ) {
 			return; // No actual change – avoid a no-op audit entry.

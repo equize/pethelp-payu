@@ -91,12 +91,6 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		return $codes ?: self::DEFAULT_PERMANENT_DECLINE_CODES;
 	}
 
-	/**
-	 * Public wrapper around the widget config builder so other parts of the
-	 * plugin (the dedicated card-change page's "add new card" option, which
-	 * needs a zero-value tokenization widget) can reuse this gateway's
-	 * credentials without needing access to the protected get_credential().
-	 */
 	public function get_widget_config( float $amount, string $email ): array {
 		return Pethelp_PayU_Widget_Helper::build( [
 			'pos_id'     => $this->get_credential( 'pos_id' ),
@@ -108,41 +102,6 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		] );
 	}
 
-	/**
-	 * Upgrades a single-use widget token (`TOK_...`) into a genuine
-	 * multi-use card token (`TOKC_...`) by creating a zero-amount,
-	 * no-purchase order, per PayU's docs:
-	 * https://developers.payu.com/europe/pl/docs/payment-solutions/cards/tokenization/create-token/#token-create-no-purchase-multi-use
-	 *
-	 * The widget's own success-callback value is single-use and must NOT
-	 * be stored directly as a reusable token – only the `payMethods.payMethod.value`
-	 * in THIS call's response (type CARD_TOKEN, prefixed TOKC_) is reusable.
-	 *
-	 * Returns the raw decoded order response; the caller passes it to
-	 * Pethelp_PayU_Token_Repository::create_from_order_response().
-	 *
-	 * @throws Exception On API error, or if PayU asks for an additional
-	 *                    3DS/CVV step (status WARNING_CONTINUE_3DS /
-	 *                    WARNING_CONTINUE_CVV) – not expected here since the
-	 *                    widget already completes 3DS itself before calling
-	 *                    back, but surfaced rather than silently mishandled
-	 *                    if it ever does occur.
-	 */
-	/**
-	 * @param string $continue_url Where PayU sends the customer back after
-	 *                             a 3DS/CVV challenge (see handle 3DS below).
-	 * @return array Raw decoded order response. Callers must check
-	 *               `status.statusCode`: WARNING_CONTINUE_3DS / WARNING_CONTINUE_CVV
-	 *               means the token in `payMethods.payMethod.value` is
-	 *               provisional – the customer must complete the challenge
-	 *               at `redirectUri` before the order (and token) is final.
-	 *               Confirmed live against this merchant's sandbox: the
-	 *               "no purchase" zero-amount tokenization order still
-	 *               triggers a real 3DS2 challenge (WARNING_CONTINUE_3DS +
-	 *               redirectUri), it is NOT synchronous/immediate.
-	 * @throws Exception On API error, or a response with neither a token
-	 *                    nor a redirect to follow.
-	 */
 	public function create_multi_use_token_order( string $single_use_token, int $user_id, string $email, string $first_name, string $last_name, string $continue_url ): array {
 		$api = $this->build_api();
 
@@ -198,6 +157,11 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		return $result;
 	}
 
+	public function fetch_card_token( string $token, int $user_id, string $email ): array {
+		$api = $this->build_api();
+		return $api->get_card_token( $token, $this->get_ext_customer_id( $user_id ), $email );
+	}
+
 	/**
 	 * Fetches the current state of a PayU order – used after the customer
 	 * returns from a 3DS/CVV redirect to confirm the tokenization order's
@@ -234,8 +198,23 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 		$order_id = absint( get_query_var( 'order-pay' ) );
 		$order    = $order_id ? wc_get_order( $order_id ) : null;
-		$amount   = $order ? (float) $order->get_total() : (float) ( WC()->cart ? WC()->cart->get_total( 'edit' ) : 0 );
-		$email    = $order ? $order->get_billing_email() : ( WC()->checkout() ? WC()->checkout()->get_value( 'billing_email' ) : '' );
+		$renewal  = wcs_cart_contains_renewal();
+
+		if ( $renewal ) {
+			$renewal_order_id = isset( $renewal['subscription_renewal']['renewal_order_id'] ) ? $renewal['subscription_renewal']['renewal_order_id'] : null;
+			$renewal_order = wc_get_order( $renewal_order_id );
+
+			if ( $renewal_order ) {
+				$existing = $this->get_subscription_and_active_token_for_order( $renewal_order );
+				if ( $existing ) {
+					$this->render_existing_token_fields( $existing[1] );
+					return;
+				}
+			}
+		}
+
+		$amount = $order ? (float) $order->get_total() : (float) ( WC()->cart ? WC()->cart->get_total( 'edit' ) : 0 );
+		$email  = $order ? $order->get_billing_email() : ( WC()->checkout() ? WC()->checkout()->get_value( 'billing_email' ) : '' );
 
 		$widget = $this->get_widget_config( $amount, (string) $email );
 
@@ -265,6 +244,10 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 	}
 
 	public function validate_fields(): bool {
+		if ( ! empty( $_POST['pethelp_payu_use_existing_token'] ) ) {
+			return true; // Charging the subscription's already-assigned token – no widget data to validate.
+		}
+
 		if ( empty( $_POST['pethelp_payu_token_value'] ) ) {
 			wc_add_notice( __( 'Nie udało się zweryfikować karty płatniczej. Spróbuj ponownie.', 'pethelp-payu-cards' ), 'error' );
 			return false;
@@ -279,6 +262,16 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 	public function process_payment( $order_id ): array {
 		$order = wc_get_order( $order_id );
+
+		if ( ! empty( $_POST['pethelp_payu_use_existing_token'] ) ) {
+			$existing = $this->get_subscription_and_active_token_for_order( $order );
+
+			if ( $existing ) {
+				return $this->process_payment_with_existing_token( $order, $existing[0], $existing[1] );
+			}
+			// Fell through: token got invalidated between rendering the form
+			// and submitting it – continue below and require a fresh card.
+		}
 
 		$widget_token = [
 			'type'        => sanitize_text_field( wp_unslash( $_POST['pethelp_payu_token_type'] ?? '' ) ),
@@ -314,7 +307,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 			$order->update_meta_data( '_pethelp_payu_order_id', $payu_order_id );
 			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
-			$order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
+			$order->update_meta_data( '_pethelp_payu_token_id', $token_id );
 			$order->save();
 
 			if ( $token_id && function_exists( 'wcs_get_subscriptions_for_order' ) ) {
@@ -327,6 +320,13 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 				'pending',
 				sprintf( __( 'Oczekiwanie na potwierdzenie płatności kartą PayU. PayU Order ID: %s', 'pethelp-payu-cards' ), $payu_order_id )
 			);
+
+			$token = Pethelp_PayU_Token_Repository::get( $token_id );
+			$card_token = $this->fetch_card_token( $token['payu_token'], $order->get_customer_id(), $order->get_billing_email() );
+
+			if ( $card_token ) {
+				Pethelp_PayU_Token_Repository::update_card_brand( $token_id, $card_token['cardBrand'] ?? '');
+			}
 			
 			if ( WC()->cart ) {
 				WC()->cart->empty_cart();
@@ -349,12 +349,108 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		}
 	}
 
-	// -------------------------------------------------------------------------
-	// Automated renewal payments (STANDARD) – also replayed by the site's
-	// generic gateway-agnostic retry engine (Pethelp\PaymentsRetry), which
-	// simply re-fires this same `woocommerce_scheduled_subscription_payment_*`
-	// hook, so no bespoke retry handling is needed here.
-	// -------------------------------------------------------------------------
+	/**
+	 * Renders the "you're paying with your already-saved card" fields in
+	 * place of the tokenization widget – no widget round-trip needed.
+	 */
+	private function render_existing_token_fields( array $token ): void {
+		?>
+		<div class="pethelp-payu-existing-card mt-3">
+			<p>
+				<?php
+				printf(
+					/* translators: masked card number */
+					wp_kses_post( __( 'Zostanie obciążona zapisana karta: %s', 'pethelp-payu-cards' ) ),
+					'<strong>' . esc_html( $token['masked_card'] ?: '••••' ) . '</strong>'
+				);
+				?>
+			</p>
+			<input type="hidden" name="pethelp_payu_use_existing_token" value="1"/>
+		</div>
+		<?php
+	}
+
+	/**
+	 * If $order belongs to a subscription already on this gateway with an
+	 * active token assigned (a renewal order, or a manual/early "pay now" on
+	 * an order tied to an already-active subscription), returns that
+	 * [subscription, token] pair. Returns null for a genuinely new
+	 * subscription signup, which has no token yet.
+	 *
+	 * @return array{0:\WC_Subscription,1:array}|null
+	 */
+	private function get_subscription_and_active_token_for_order( \WC_Order $order ): ?array {
+		if ( ! function_exists( 'wcs_get_subscriptions_for_order' ) ) {
+			return null;
+		}
+
+		foreach ( wcs_get_subscriptions_for_order( $order, [ 'order_type' => 'any' ] ) as $subscription ) {
+			if ( $subscription->get_payment_method() !== $this->id ) {
+				continue;
+			}
+
+			$token_id = (int) $subscription->get_meta( '_pethelp_payu_token_id' );
+			$token    = $token_id ? Pethelp_PayU_Token_Repository::get( $token_id ) : null;
+
+			if ( $token && $token['status'] === Pethelp_PayU_Token_Repository::STATUS_ACTIVE ) {
+				return [ $subscription, $token ];
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Charges a subscription's already-assigned token directly for a
+	 * customer-initiated "pay now" (renewal, or forcing an early/failed
+	 * payment) – mirrors scheduled_subscription_payment()'s STANDARD charge,
+	 * including the same permanent-decline handling, but returns a
+	 * WC gateway result array instead of just updating order status.
+	 *
+	 * @return array{result:string,redirect?:string}
+	 */
+	private function process_payment_with_existing_token( \WC_Order $order, \WC_Subscription $subscription, array $token ): array {
+		$token_id = (int) $token['id'];
+
+		try {
+			$api     = $this->build_api();
+			$payload = $this->build_charge_payload( $order, $token['payu_token'], 'STANDARD' );
+
+			$this->log( sprintf( 'Karta cykliczna [order #%d]: ręczna płatność istniejącym tokenem #%d – payload=%s', $order->get_id(), $token_id, wp_json_encode( $payload ) ) );
+
+			$result = $api->create_order( $payload );
+
+			$this->log( sprintf( 'Karta cykliczna [order #%d]: odpowiedź PayU – %s', $order->get_id(), wp_json_encode( $result ) ) );
+
+			if ( empty( $result['orderId'] ) ) {
+				throw new Exception( __( 'PayU nie zwróciło identyfikatora zamówienia.', 'pethelp-payu-cards' ) );
+			}
+
+			$order->update_meta_data( '_pethelp_payu_order_id', $result['orderId'] );
+			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
+			$order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
+			$order->save();
+
+			$order->add_order_note( sprintf(
+				__( 'PayU: ręczna płatność istniejącą kartą (token #%1$d). PayU Order ID: %2$s', 'pethelp-payu-cards' ),
+				$token_id,
+				$result['orderId']
+			) );
+
+			$redirect = ! empty( $result['redirectUri'] ) ? $result['redirectUri'] : $order->get_checkout_order_received_url();
+
+			return [
+				'result'   => 'success',
+				'redirect' => $redirect,
+			];
+
+		} catch ( Exception $e ) {
+			$this->handle_charge_failure( $order, $subscription, $token_id, $e );
+			wc_add_notice( $e->getMessage(), 'error' );
+			return [ 'result' => 'failure' ];
+		}
+	}
+
 	public function scheduled_subscription_payment( float $amount_to_charge, \WC_Order $renewal_order ): void {
 		$subscriptions = function_exists( 'wcs_get_subscriptions_for_renewal_order' )
 			? wcs_get_subscriptions_for_renewal_order( $renewal_order )
@@ -410,14 +506,6 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		}
 	}
 
-	/**
-	 * Handles a failed renewal/first-payment charge: logs it, and – only
-	 * when the decline code is on the configured "permanent" list –
-	 * invalidates the token and blocks further automatic retries.
-	 * Transient declines are left alone: the site's generic retry engine
-	 * (hooked on `woocommerce_order_status_failed`) already re-attempts via
-	 * scheduled_subscription_payment().
-	 */
 	private function handle_charge_failure( \WC_Order $renewal_order, \WC_Subscription $subscription, int $token_id, Exception $e ): void {
 		$decline_code = $e instanceof Pethelp_PayU_Cards_Exception ? $e->getCodeLiteral() : '';
 

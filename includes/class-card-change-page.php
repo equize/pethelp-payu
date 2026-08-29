@@ -12,15 +12,40 @@ class Pethelp_PayU_Card_Change_Page {
 		add_action( 'template_redirect', [ __CLASS__, 'maybe_handle' ] );
 	}
 
-	public static function get_url( int $subscription_id ): string {
-		return add_query_arg(
-			[
-				self::QUERY_VAR    => 1,
-				'subscription_id'  => $subscription_id,
-				'_wpnonce'         => wp_create_nonce( self::NONCE_ACTION_PREFIX . $subscription_id ),
-			],
-			home_url( '/' )
-		);
+	/**
+	 * @param string|null $redirect Optional URL to send the customer back to
+	 *                              once the card change is done/cancelled –
+	 *                              validated against open-redirect on the way
+	 *                              in (see get_safe_redirect()).
+	 */
+	public static function get_url( int $subscription_id, ?string $redirect = null ): string {
+		$args = [
+			self::QUERY_VAR    => 1,
+			'subscription_id'  => $subscription_id,
+			'_wpnonce'         => wp_create_nonce( self::NONCE_ACTION_PREFIX . $subscription_id ),
+		];
+
+		if ( $redirect ) {
+			$args['redirect'] = $redirect;
+		}
+
+		return add_query_arg( $args, home_url( '/' ) );
+	}
+
+	/**
+	 * Reads & validates the "redirect" request param – wp_validate_redirect()
+	 * keeps it to this site only, since it arrives via an untrusted query string.
+	 */
+	private static function get_safe_redirect(): ?string {
+		$redirect = isset( $_REQUEST['redirect'] ) ? esc_url_raw( wp_unslash( $_REQUEST['redirect'] ) ) : '';
+
+		if ( ! $redirect ) {
+			return null;
+		}
+
+		$validated = wp_validate_redirect( $redirect, '' );
+
+		return $validated ?: null;
 	}
 
 	public static function maybe_handle(): void {
@@ -46,18 +71,20 @@ class Pethelp_PayU_Card_Change_Page {
 			wp_die( esc_html__( 'Nie znaleziono subskrypcji, brak dostępu, lub zmiana karty jest dla niej niedostępna.', 'pethelp-payu-cards' ), '', [ 'response' => 403 ] );
 		}
 
+		$redirect = self::get_safe_redirect();
+
 		// Customer returning from PayU's 3DS/CVV challenge page.
 		if ( ! empty( $_GET['tokenize_pending'] ) ) {
-			self::handle_continue( $subscription );
+			self::handle_continue( $subscription, $redirect );
 			return;
 		}
 
 		if ( ! empty( $_POST['pethelp_payu_change_card_action'] ) ) {
-			self::handle_submit( $subscription );
+			self::handle_submit( $subscription, $redirect );
 			return;
 		}
 
-		self::render( $subscription );
+		self::render( $subscription, '', $redirect );
 		exit;
 	}
 
@@ -91,7 +118,7 @@ class Pethelp_PayU_Card_Change_Page {
 	// Submit handling
 	// -------------------------------------------------------------------------
 
-	private static function handle_submit( \WC_Subscription $subscription ): void {
+	private static function handle_submit( \WC_Subscription $subscription, ?string $redirect ): void {
 		$action = sanitize_text_field( wp_unslash( $_POST['pethelp_payu_change_card_action'] ) );
 		$user_id = get_current_user_id();
 
@@ -109,7 +136,7 @@ class Pethelp_PayU_Card_Change_Page {
 			$single_use_token = sanitize_text_field( wp_unslash( $_POST['pethelp_payu_token_value'] ?? '' ) );
 
 			if ( empty( $single_use_token ) ) {
-				self::render( $subscription, __( 'Nie udało się zweryfikować nowej karty. Spróbuj ponownie.', 'pethelp-payu-cards' ) );
+				self::render( $subscription, __( 'Nie udało się zweryfikować nowej karty. Spróbuj ponownie.', 'pethelp-payu-cards' ), $redirect );
 				exit;
 			}
 
@@ -120,8 +147,7 @@ class Pethelp_PayU_Card_Change_Page {
 			}
 
 			$user = wp_get_current_user();
-
-			$continue_url = add_query_arg( 'tokenize_pending', '1', self::get_url( $subscription->get_id() ) );
+			$continue_url = add_query_arg( 'tokenize_pending', 1, self::get_url( $subscription->get_id(), $redirect ) );
 
 			try {
 				$order_response = $gateway->create_multi_use_token_order(
@@ -132,13 +158,21 @@ class Pethelp_PayU_Card_Change_Page {
 					$user->last_name,
 					$continue_url
 				);
+
+				$token_id = Pethelp_PayU_Token_Repository::create_from_order_response( $user_id, $order_response );
+				Pethelp_PayU_Token_Repository::assign_to_subscription( $token_id, $subscription );
+
+				$token = Pethelp_PayU_Token_Repository::get( $token_id );
+				$card_token = $gateway->fetch_card_token( $token['payu_token'], $user_id, $user->user_email );
+
+				if ( $card_token ) {
+					Pethelp_PayU_Token_Repository::update_card_brand( $token_id, $card_token['cardBrand'] ?? '');
+				}
+
 			} catch ( Exception $e ) {
-				self::render( $subscription, $e->getMessage() );
+				self::render( $subscription, $e->getMessage(), $redirect );
 				exit;
 			}
-
-			$token_id = Pethelp_PayU_Token_Repository::create_from_order_response( $user_id, $order_response );
-			Pethelp_PayU_Token_Repository::assign_to_subscription( $token_id, $subscription );
 
 			if ( ! empty( $order_response['redirectUri'] ) ) {
 				wp_redirect( $order_response['redirectUri'] );
@@ -149,12 +183,12 @@ class Pethelp_PayU_Card_Change_Page {
 			wp_die( esc_html__( 'Nieprawidłowe żądanie.', 'pethelp-payu-cards' ), '', [ 'response' => 400 ] );
 		}
 
-		wp_safe_redirect( add_query_arg( 'done', '1', self::get_url( $subscription->get_id() ) ) );
+		wp_safe_redirect( add_query_arg( 'done', '1', self::get_url( $subscription->get_id(), $redirect ) ) );
 		exit;
 	}
 
-	private static function handle_continue( \WC_Subscription $subscription ): void {
-		wp_safe_redirect( add_query_arg( 'done', '1', self::get_url( $subscription->get_id() ) ) );
+	private static function handle_continue( \WC_Subscription $subscription, ?string $redirect ): void {
+		wp_safe_redirect( add_query_arg( 'done', '1', self::get_url( $subscription->get_id(), $redirect ) ) );
 		exit;
 	}
 
@@ -162,18 +196,18 @@ class Pethelp_PayU_Card_Change_Page {
 	// Rendering
 	// -------------------------------------------------------------------------
 
-	private static function render( \WC_Subscription $subscription, string $error = '' ): void {
+	private static function render( \WC_Subscription $subscription, string $error = '', ?string $redirect = null ): void {
 		$user_id          = get_current_user_id();
 		$current_token_id = (int) $subscription->get_meta( '_pethelp_payu_token_id' );
 		$current_token    = $current_token_id ? Pethelp_PayU_Token_Repository::get( $current_token_id ) : null;
 		$tokens           = array_filter(
 			Pethelp_PayU_Token_Repository::get_active_for_user( $user_id ),
-			static function ( $token ) use ( $current_token_id ) {
-				return (int) $token['id'] !== $current_token_id;
+			function ( $token ) use ( $current_token_id, $subscription ) {
+				return (int) $token['id'] !== $current_token_id && $subscription->get_id() === (int)  $token['current_subscription_id'];
 			}
 		);
 		$done       = ! empty( $_GET['done'] );
-		$cancel_url = home_url('/');
+		$cancel_url = $redirect ?: home_url('/');
 
 		$gateway = self::get_gateway();
 		$widget  = $gateway

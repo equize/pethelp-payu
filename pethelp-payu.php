@@ -47,8 +47,8 @@ function pethelp_payu_cards_init() {
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-gateway-card-recurring.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-card-change-page.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-admin-subscription-fields.php';
-	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-expiry-reminders.php';
-	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-migration.php';
+	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-admin-tokens-page.php';
+	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-token-expiry-housekeeping.php';
 
 	if ( get_option( 'pethelp_payu_cards_db_version' ) !== PETHELP_PAYU_CARDS_VERSION ) {
 		Pethelp_PayU_Token_Repository::install_table();
@@ -57,8 +57,8 @@ function pethelp_payu_cards_init() {
 
 	Pethelp_PayU_Card_Change_Page::init();
 	Pethelp_PayU_Admin_Subscription_Fields::init();
-	Pethelp_PayU_Expiry_Reminders::init();
-	Pethelp_PayU_Migration::init();
+	Pethelp_PayU_Admin_Tokens_Page::init();
+	Pethelp_PayU_Token_Expiry_Housekeeping::init();
 
 	add_filter( 'woocommerce_payment_gateways', 'pethelp_payu_cards_register_gateways' );
 }

@@ -201,7 +201,6 @@ class Pethelp_PayU_Cards_API {
 				$value = $cardToken['value'] ?? null;
 
 				if ( $value == $token ) {
-					pe($cardToken);
 					return $cardToken;
 				}
 			}

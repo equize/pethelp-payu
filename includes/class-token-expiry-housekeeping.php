@@ -2,7 +2,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-class Pethelp_PayU_Expiry_Reminders {
+class Pethelp_PayU_Token_Expiry_Housekeeping {
 
 	const HOOK  = 'pethelp_payu_daily_token_check';
 	const GROUP = 'pethelp_payu_cards';
@@ -25,14 +25,6 @@ class Pethelp_PayU_Expiry_Reminders {
 	}
 
 	public static function run(): void {
-		foreach ( Pethelp_PayU_Token_Repository::find_expiring_in_days( 7 ) as $token ) {
-			do_action( 'pethelp_payu_card_expiring_7d', (int) $token['id'] );
-		}
-
-		foreach ( Pethelp_PayU_Token_Repository::find_expiring_in_days( 0 ) as $token ) {
-			do_action( 'pethelp_payu_card_expiring_today', (int) $token['id'] );
-		}
-
 		foreach ( Pethelp_PayU_Token_Repository::find_past_expiry() as $token ) {
 			Pethelp_PayU_Token_Repository::mark_expired( (int) $token['id'] );
 		}

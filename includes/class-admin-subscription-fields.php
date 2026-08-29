@@ -19,12 +19,12 @@ class Pethelp_PayU_Admin_Subscription_Fields {
 		}
 
 		$current_token_id = (int) $subscription->get_meta( '_pethelp_payu_token_id' );
-		$current_token    = $current_token_id ? Pethelp_PayU_Token_Repository::get( $current_token_id ) : null;
-		$tokens            = Pethelp_PayU_Token_Repository::get_active_for_user( (int) $subscription->get_customer_id() );
-
-		if ( $current_token && $current_token['status'] !== Pethelp_PayU_Token_Repository::STATUS_ACTIVE ) {
-			array_unshift( $tokens, $current_token );
-		}
+		$tokens           = array_filter(
+			Pethelp_PayU_Token_Repository::get_active_for_user( (int) $subscription->get_customer_id() ),
+			function ( $token ) use ( $current_token_id, $subscription ) {
+				return $subscription->get_id() === (int)  $token['current_subscription_id'];
+			}
+		);
 
 		$change_card_url = Pethelp_PayU_Card_Change_Page::get_url( $subscription->get_id() );
 
@@ -53,15 +53,11 @@ class Pethelp_PayU_Admin_Subscription_Fields {
 				</select>
 			</p>
 
-			<p class="form-field" style="width:100%;">
+			<p class="form-field" style="width:100%;margin-bottom:12px;">
 				<button type="button" class="button pethelp-payu-copy-link" data-link="<?php echo esc_url( $change_card_url ); ?>">
 					<?php esc_html_e( 'Kopiuj link zmiany karty', 'pethelp-payu-cards' ); ?>
 				</button>
 				<span class="pethelp-payu-copy-status" style="margin-left:6px;color:#1a9c53;display:none;"><?php esc_html_e( 'Skopiowano!', 'pethelp-payu-cards' ); ?></span>
-			</p>
-
-			<p class="description" style="width:100%;">
-				<?php esc_html_e( 'Wybór karty z listy jest zapisywany przy aktualizacji subskrypcji. Nie ma możliwości ręcznego wprowadzenia danych karty – karty pochodzą wyłącznie z tokenizacji PayU.', 'pethelp-payu-cards' ); ?>
 			</p>
 		</div>
 		<?php
