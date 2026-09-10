@@ -116,7 +116,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 				get_bloginfo( 'name' )
 			),
 			'currencyCode'  => get_woocommerce_currency(),
-			'totalAmount'   => '0001',
+			'totalAmount'   => '0',
 			// Required for a no-purchase order to mint a reusable token
 			// instead of just processing a (non-existent) payment.
 			'cardOnFile'    => 'FIRST',
@@ -594,7 +594,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 		$sig_header = $_SERVER['HTTP_OPENPAYU_SIGNATURE'] ?? '';
 		if ( ! Pethelp_PayU_Cards_API::verify_notification( $raw_body, $sig_header, $this->get_credential( 'second_key' ) ) ) {
-			$this->log( sprintf( 'Karta cykliczna: nieprawidłowy podpis notyfikacji. Signature: %s', $sig_header ), [], 'error' );
+			$this->log( sprintf( 'Karta cykliczna: nieprawidłowy podpis notyfikacji. Signature: %s %s', $sig_header ), [], 'error' );
 			status_header( 401 );
 			exit( 'Invalid signature' );
 		}
