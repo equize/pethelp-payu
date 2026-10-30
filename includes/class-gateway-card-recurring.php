@@ -327,7 +327,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			if ( $card_token ) {
 				Pethelp_PayU_Token_Repository::update_card_brand( $token_id, $card_token['cardBrand'] ?? '');
 			}
-			
+
 			if ( WC()->cart ) {
 				WC()->cart->empty_cart();
 			}
@@ -526,10 +526,6 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		if ( $is_permanent ) {
 			Pethelp_PayU_Token_Repository::invalidate( $token_id, $decline_code );
 
-			if ( function_exists( 'as_unschedule_all_actions' ) ) {
-				as_unschedule_all_actions( 'pethelp_retry_payment_attempt', [ 'order_id' => $renewal_order->get_id() ] );
-			}
-
 			$note = sprintf(
 				__( 'PayU: trwała odmowa płatności (kod %1$s). Token #%2$d unieważniony, automatyczne ponowienia zablokowane. Klient musi przypisać nową kartę.', 'pethelp-payu-cards' ),
 				$decline_code,
@@ -594,7 +590,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 		$sig_header = $_SERVER['HTTP_OPENPAYU_SIGNATURE'] ?? '';
 		if ( ! Pethelp_PayU_Cards_API::verify_notification( $raw_body, $sig_header, $this->get_credential( 'second_key' ) ) ) {
-			$this->log( sprintf( 'Karta cykliczna: nieprawidłowy podpis notyfikacji. Signature: %s %s', $sig_header ), [], 'error' );
+			$this->log( sprintf( 'Karta cykliczna: nieprawidłowy podpis notyfikacji. Signature: %s', $sig_header ), [], 'error' );
 			status_header( 401 );
 			exit( 'Invalid signature' );
 		}
@@ -707,6 +703,10 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 					$order->update_status( 'failed', __( 'Płatność kartą PayU odrzucona.', 'pethelp-payu-cards' ) );
 				}
 
+				if ( ! $is_renewal ) {
+					$this->invalidate_first_payment_token( $order, $payu_status );
+				}
+
 				if ( $is_renewal && function_exists( 'wcs_get_subscriptions_for_renewal_order' ) ) {
 					foreach ( wcs_get_subscriptions_for_renewal_order( $order ) as $sub ) {
 						if ( method_exists( $sub, 'payment_failed' ) ) {
@@ -715,6 +715,36 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 					}
 				}
 				break;
+		}
+	}
+
+	/**
+	 * The first card payment saves the card as a token and assigns it to the
+	 * subscription before PayU reports the outcome. When that payment is
+	 * cancelled or rejected the card never paid, so its token is invalidated –
+	 * renewals only charge active tokens. As with a permanent decline, the token
+	 * stays assigned and in the catalogue for history and audit, and the card
+	 * change page shows it as invalidated.
+	 */
+	private function invalidate_first_payment_token( \WC_Order $order, string $payu_status ): void {
+		$token_id = (int) $order->get_meta( '_pethelp_payu_token_id' );
+
+		if ( ! $token_id || ! Pethelp_PayU_Token_Repository::invalidate( $token_id, 'first_payment_' . strtolower( $payu_status ) ) ) {
+			return;
+		}
+
+		$note = sprintf(
+			__( 'PayU: pierwsza płatność kartą nie powiodła się (%1$s). Token #%2$d unieważniony – klient musi dodać nową kartę.', 'pethelp-payu-cards' ),
+			$payu_status,
+			$token_id
+		);
+
+		$order->add_order_note( $note );
+
+		if ( function_exists( 'wcs_get_subscriptions_for_order' ) ) {
+			foreach ( wcs_get_subscriptions_for_order( $order, [ 'order_type' => 'parent' ] ) as $subscription ) {
+				$subscription->add_order_note( $note );
+			}
 		}
 	}
 

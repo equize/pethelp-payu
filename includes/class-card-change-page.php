@@ -210,9 +210,7 @@ class Pethelp_PayU_Card_Change_Page {
 		$cancel_url = $redirect ?: home_url('/');
 
 		$gateway = self::get_gateway();
-		$widget  = $gateway
-			? $gateway->get_widget_config( 0.0, (string) wp_get_current_user()->user_email )
-			: null;
+		$widget  = $gateway ? $gateway->get_widget_config( 0.0, (string) wp_get_current_user()->user_email ) : null;
 
 		$logo_url  = esc_url( get_site_icon_url( 64 ) );
 		$shop_name = esc_html( get_bloginfo( 'name' ) );

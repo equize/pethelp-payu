@@ -46,6 +46,7 @@ function pethelp_payu_cards_init() {
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-gateway-pbl.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-gateway-card-recurring.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-card-change-page.php';
+	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-return-page.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-admin-subscription-fields.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-admin-tokens-page.php';
 	require_once PETHELP_PAYU_CARDS_PATH . 'includes/class-token-expiry-housekeeping.php';
@@ -56,6 +57,7 @@ function pethelp_payu_cards_init() {
 	}
 
 	Pethelp_PayU_Card_Change_Page::init();
+	Pethelp_PayU_Return_Page::init();
 	Pethelp_PayU_Admin_Subscription_Fields::init();
 	Pethelp_PayU_Admin_Tokens_Page::init();
 	Pethelp_PayU_Token_Expiry_Housekeeping::init();
