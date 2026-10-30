@@ -1,0 +1,56 @@
+/*
+ * Wybór zapisanej karty w checkoutcie. Wygląd jest samowystarczalny – nie zależy od klas
+ * motywu. Motyw może go dostosować zmiennymi CSS albo własnymi regułami.
+ */
+.pethelp-payu-saved-cards {
+	--pethelp-payu-accent: #e8573e;
+	--pethelp-payu-border: #d9dde3;
+	--pethelp-payu-muted: #6b7480;
+	--pethelp-payu-radius: 10px;
+
+	margin-top: 16px;
+}
+
+.pethelp-payu-saved-cards__label {
+	display: block;
+	margin: 0 0 6px;
+	font-weight: 600;
+}
+
+.pethelp-payu-saved-cards__select {
+	-webkit-appearance: none;
+	appearance: none;
+	display: block;
+	width: 100%;
+	min-height: 48px;
+	margin: 0;
+	padding: 10px 44px 10px 14px;
+	border: 1px solid var(--pethelp-payu-border);
+	border-radius: var(--pethelp-payu-radius);
+	background-color: #fff;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%236b7480' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 16px center;
+	color: inherit;
+	font: inherit;
+	font-variant-numeric: tabular-nums;
+	text-overflow: ellipsis;
+	cursor: pointer;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pethelp-payu-saved-cards__select:hover {
+	border-color: #b8bec7;
+}
+
+.pethelp-payu-saved-cards__select:focus {
+	border-color: var(--pethelp-payu-accent);
+	box-shadow: 0 0 0 1px var(--pethelp-payu-accent);
+	outline: none;
+}
+
+.pethelp-payu-saved-cards__hint {
+	margin: 6px 0 0;
+	color: var(--pethelp-payu-muted);
+	font-size: 13px;
+}

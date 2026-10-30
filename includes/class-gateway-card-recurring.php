@@ -186,8 +186,16 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			'pethelp-payu-tokenize-widget',
 			PETHELP_PAYU_CARDS_URL . 'assets/js/payu-tokenize-widget.js',
 			[ 'jquery' ],
-			PETHELP_PAYU_CARDS_VERSION,
+			// File time busts browser caches – an outdated script would open the widget for a saved card.
+			PETHELP_PAYU_CARDS_VERSION . '.' . filemtime( PETHELP_PAYU_CARDS_PATH . 'assets/js/payu-tokenize-widget.js' ),
 			true
+		);
+
+		wp_enqueue_style(
+			'pethelp-payu-checkout',
+			PETHELP_PAYU_CARDS_URL . 'assets/css/checkout.css',
+			[],
+			PETHELP_PAYU_CARDS_VERSION . '.' . filemtime( PETHELP_PAYU_CARDS_PATH . 'assets/css/checkout.css' )
 		);
 	}
 
@@ -216,10 +224,25 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 		$amount = $order ? (float) $order->get_total() : (float) ( WC()->cart ? WC()->cart->get_total( 'edit' ) : 0 );
 		$email  = $order ? $order->get_billing_email() : ( WC()->checkout() ? WC()->checkout()->get_value( 'billing_email' ) : '' );
 
-		$widget = $this->get_widget_config( $amount, (string) $email );
+		$widget      = $this->get_widget_config( $amount, (string) $email );
+		$saved_cards = $this->get_saved_cards( get_current_user_id() );
 
 		?>
 		<div class="pethelp-payu-card-fields" data-gateway-id="<?php echo esc_attr( $this->id ); ?>">
+			<?php if ( $saved_cards ) : ?>
+				<div class="pethelp-payu-saved-cards">
+					<label class="pethelp-payu-saved-cards__label" for="pethelp_payu_saved_token"><?php esc_html_e( 'Wybierz kartę', 'pethelp-payu-cards' ); ?></label>
+					<select class="pethelp-payu-saved-cards__select" id="pethelp_payu_saved_token" name="pethelp_payu_saved_token">
+						<?php foreach ( array_values( $saved_cards ) as $index => $card ) : ?>
+							<option value="<?php echo (int) $card['id']; ?>" <?php selected( $index, 0 ); ?>>
+								<?php echo esc_html( self::saved_card_label( $card ) ); ?>
+							</option>
+						<?php endforeach; ?>
+						<option value="new"><?php esc_html_e( 'Dodaj nową kartę', 'pethelp-payu-cards' ); ?></option>
+					</select>
+					<p class="pethelp-payu-saved-cards__hint"><?php esc_html_e( 'Nową kartę podasz w bezpiecznym oknie PayU.', 'pethelp-payu-cards' ); ?></p>
+				</div>
+			<?php endif; ?>
 			<input type="hidden" name="pethelp_payu_token_type" class="pethelp-payu-token-type" value="" />
 			<input type="hidden" name="pethelp_payu_token_value" class="pethelp-payu-token-value" value="" />
 			<input type="hidden" name="pethelp_payu_masked_card" class="pethelp-payu-masked-card" value="" />
@@ -248,6 +271,15 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			return true; // Charging the subscription's already-assigned token – no widget data to validate.
 		}
 
+		if ( $this->get_posted_saved_card_id() !== null ) {
+			if ( ! $this->get_posted_saved_card() ) {
+				wc_add_notice( __( 'Wybrana karta jest niedostępna. Wybierz inną kartę lub dodaj nową.', 'pethelp-payu-cards' ), 'error' );
+				return false;
+			}
+
+			return true;
+		}
+
 		if ( empty( $_POST['pethelp_payu_token_value'] ) ) {
 			wc_add_notice( __( 'Nie udało się zweryfikować karty płatniczej. Spróbuj ponownie.', 'pethelp-payu-cards' ), 'error' );
 			return false;
@@ -271,6 +303,12 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			}
 			// Fell through: token got invalidated between rendering the form
 			// and submitting it – continue below and require a fresh card.
+		}
+
+		$saved_card = $this->get_posted_saved_card();
+
+		if ( $saved_card ) {
+			return $this->process_payment_with_saved_card( $order, $saved_card );
 		}
 
 		$widget_token = [
@@ -306,8 +344,12 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			);
 
 			$order->update_meta_data( '_pethelp_payu_order_id', $payu_order_id );
+			$order->update_meta_data( '_pethelp_payu_total_amount', $payload['totalAmount'] );
 			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
 			$order->update_meta_data( '_pethelp_payu_token_id', $token_id );
+			$order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
+			// A retry with a new card after a declined saved-card payment: this token is new again.
+			$order->delete_meta_data( '_pethelp_payu_saved_card_payment' );
 			$order->save();
 
 			if ( $token_id && function_exists( 'wcs_get_subscriptions_for_order' ) ) {
@@ -343,7 +385,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 		} catch ( Exception $e ) {
 			$this->log( sprintf( 'Karta cykliczna [order #%d]: błąd pierwszej płatności – %s', $order_id, $e->getMessage() ), [], 'error' );
-			wc_add_notice( $e->getMessage(), 'error' );
+			wc_add_notice( self::customer_payment_error(), 'error' );
 			$order->add_order_note( 'Błąd PayU – płatność cykliczna kartą (pierwsza płatność): ' . $e->getMessage() );
 			return [ 'result' => 'failure' ];
 		}
@@ -379,6 +421,163 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 	 *
 	 * @return array{0:\WC_Subscription,1:array}|null
 	 */
+	/**
+	 * Customer's saved cards to offer at checkout: active tokens confirmed by
+	 * a successful payment or card change (assigned to a plan at least once).
+	 * Every card payment creates a new token, so tokens of the same card are
+	 * collapsed to the newest one (same masked number and expiry).
+	 *
+	 * @return array<string,array>
+	 */
+	private function get_saved_cards( int $user_id ): array {
+		if ( $user_id <= 0 ) {
+			return [];
+		}
+
+		$cards = [];
+
+		foreach ( Pethelp_PayU_Token_Repository::get_active_for_user( $user_id ) as $token ) {
+			if ( (int) $token['current_subscription_id'] <= 0 ) {
+				continue;
+			}
+
+			$key = $token['masked_card'] . '|' . $token['exp_month'] . '|' . $token['exp_year'];
+
+			if ( ! isset( $cards[ $key ] ) || (int) $token['id'] > (int) $cards[ $key ]['id'] ) {
+				$cards[ $key ] = $token;
+			}
+		}
+
+		// Migrated tokens have no expiry date – hide one when the same card is already
+		// listed with full data, so a customer never sees the same card twice.
+		$with_expiry = [];
+		foreach ( $cards as $card ) {
+			if ( $card['exp_month'] && $card['exp_year'] ) {
+				$with_expiry[ $card['masked_card'] ] = true;
+			}
+		}
+		$cards = array_filter( $cards, function ( $card ) use ( $with_expiry ) {
+			return ( $card['exp_month'] && $card['exp_year'] ) || ! isset( $with_expiry[ $card['masked_card'] ] );
+		} );
+
+		uasort( $cards, function ( $a, $b ) {
+			return (int) $b['id'] <=> (int) $a['id'];
+		} );
+
+		return $cards;
+	}
+
+	/**
+	 * Saved card as one select option: masked number, brand and expiry.
+	 */
+	private static function saved_card_label( array $card ): string {
+		$parts = [ $card['masked_card'] ?: '••••', self::card_brand_name( (string) $card['card_brand'] ) ];
+
+		if ( $card['exp_month'] && $card['exp_year'] ) {
+			$parts[] = sprintf( __( 'ważna do %02d/%d', 'pethelp-payu-cards' ), $card['exp_month'], $card['exp_year'] );
+		}
+
+		return implode( ' · ', $parts );
+	}
+
+	/**
+	 * Full brand name of a saved card.
+	 */
+	private static function card_brand_name( string $brand ): string {
+		$names = [
+			'VISA'       => 'Visa',
+			'MASTERCARD' => 'Mastercard',
+			'MAESTRO'    => 'Maestro',
+		];
+
+		return $names[ strtoupper( $brand ) ] ?? ( $brand !== '' ? ucfirst( strtolower( $brand ) ) : __( 'Karta płatnicza', 'pethelp-payu-cards' ) );
+	}
+
+	/**
+	 * Saved card id chosen at checkout, or null when the customer pays with a
+	 * new card (or has no saved cards).
+	 */
+	private function get_posted_saved_card_id(): ?int {
+		$choice = sanitize_text_field( wp_unslash( $_POST['pethelp_payu_saved_token'] ?? '' ) );
+
+		return ( $choice === '' || $choice === 'new' ) ? null : absint( $choice );
+	}
+
+	private function get_posted_saved_card(): ?array {
+		$token_id = $this->get_posted_saved_card_id();
+
+		if ( ! $token_id ) {
+			return null;
+		}
+
+		foreach ( $this->get_saved_cards( get_current_user_id() ) as $card ) {
+			if ( (int) $card['id'] === $token_id ) {
+				return $card;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * First payment of a new plan with a card the customer already saved – the
+	 * existing token is charged (customer-present FIRST payment, so PayU asks
+	 * for 3DS) instead of registering the same card again.
+	 *
+	 * @return array{result:string,redirect?:string}
+	 */
+	private function process_payment_with_saved_card( \WC_Order $order, array $token ): array {
+		$token_id = (int) $token['id'];
+
+		try {
+			$payload = $this->build_charge_payload( $order, $token['payu_token'], 'FIRST' );
+			$result  = $this->build_api()->create_order( $payload );
+
+			$this->log( sprintf( 'Karta cykliczna [order #%d]: pierwsza płatność zapisaną kartą (token #%d) – status=%s', $order->get_id(), $token_id, $result['status']['statusCode'] ?? '' ) );
+
+			if ( empty( $result['orderId'] ) ) {
+				throw new Exception( __( 'PayU nie zwróciło identyfikatora zamówienia.', 'pethelp-payu-cards' ) );
+			}
+
+			$order->update_meta_data( '_pethelp_payu_order_id', $result['orderId'] );
+			$order->update_meta_data( '_pethelp_payu_total_amount', $payload['totalAmount'] );
+			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
+			$order->update_meta_data( '_pethelp_payu_token_id', $token_id );
+			$order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
+			// The card was confirmed earlier – a declined payment must not invalidate it.
+			$order->update_meta_data( '_pethelp_payu_saved_card_payment', 1 );
+			$order->save();
+
+			if ( function_exists( 'wcs_get_subscriptions_for_order' ) ) {
+				foreach ( wcs_get_subscriptions_for_order( $order, [ 'order_type' => 'parent' ] ) as $subscription ) {
+					Pethelp_PayU_Token_Repository::assign_to_subscription( $token_id, $subscription );
+				}
+			}
+
+			$order->add_order_note( sprintf(
+				__( 'PayU: pierwsza płatność zapisaną kartą %1$s (token #%2$d). PayU Order ID: %3$s', 'pethelp-payu-cards' ),
+				$token['masked_card'],
+				$token_id,
+				$result['orderId']
+			) );
+
+			if ( WC()->cart ) {
+				WC()->cart->empty_cart();
+			}
+
+			return [
+				'result'   => 'success',
+				'redirect' => ! empty( $result['redirectUri'] ) ? $result['redirectUri'] : $order->get_checkout_order_received_url(),
+			];
+
+		} catch ( Exception $e ) {
+			$this->log( sprintf( 'Karta cykliczna [order #%d]: błąd płatności zapisaną kartą – %s', $order->get_id(), $e->getMessage() ), [], 'error' );
+			wc_add_notice( self::customer_payment_error(), 'error' );
+			$order->add_order_note( 'Błąd PayU – płatność zapisaną kartą: ' . $e->getMessage() );
+			return [ 'result' => 'failure' ];
+		}
+	}
+
 	private function get_subscription_and_active_token_for_order( \WC_Order $order ): ?array {
 		if ( ! function_exists( 'wcs_get_subscriptions_for_order' ) ) {
 			return null;
@@ -427,6 +626,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			}
 
 			$order->update_meta_data( '_pethelp_payu_order_id', $result['orderId'] );
+			$order->update_meta_data( '_pethelp_payu_total_amount', $payload['totalAmount'] );
 			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
 			$order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
 			$order->save();
@@ -446,7 +646,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 
 		} catch ( Exception $e ) {
 			$this->handle_charge_failure( $order, $subscription, $token_id, $e );
-			wc_add_notice( $e->getMessage(), 'error' );
+			wc_add_notice( self::customer_payment_error(), 'error' );
 			return [ 'result' => 'failure' ];
 		}
 	}
@@ -493,6 +693,7 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			}
 
 			$renewal_order->update_meta_data( '_pethelp_payu_order_id', $result['orderId'] );
+			$renewal_order->update_meta_data( '_pethelp_payu_total_amount', $payload['totalAmount'] );
 			$renewal_order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
 			$renewal_order->update_meta_data( '_pethelp_payu_used_token_id', $token_id );
 			$renewal_order->save();
@@ -628,7 +829,9 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 			$raw_body
 		), [ 'raw_body' => $raw_body ] );
 
-		$this->apply_payu_status( $order, $payu_status, $notification );
+		if ( ! $this->is_stale_notification( $order, $payu_status, $notification ) ) {
+			$this->apply_payu_status( $order, $payu_status, $notification );
+		}
 
 		status_header( 200 );
 		exit( 'OK' );
@@ -727,6 +930,10 @@ class Pethelp_Gateway_PayU_Card_Recurring extends Pethelp_Gateway_PayU_Abstract 
 	 * change page shows it as invalidated.
 	 */
 	private function invalidate_first_payment_token( \WC_Order $order, string $payu_status ): void {
+		if ( $order->get_meta( '_pethelp_payu_saved_card_payment' ) ) {
+			return; // Paid with an already confirmed saved card – the decline says nothing about the card itself.
+		}
+
 		$token_id = (int) $order->get_meta( '_pethelp_payu_token_id' );
 
 		if ( ! $token_id || ! Pethelp_PayU_Token_Repository::invalidate( $token_id, 'first_payment_' . strtolower( $payu_status ) ) ) {

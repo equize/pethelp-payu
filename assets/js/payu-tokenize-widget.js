@@ -24,6 +24,13 @@ window.pethelpPayuWidgetCallback = function ( response ) {
 			return;
 		}
 
+		// A saved card is charged by the shop – the widget is needed only for a new card.
+		var savedCard = $( '[name="pethelp_payu_saved_token"]' ).val();
+
+		if ( savedCard && savedCard !== 'new' ) {
+			return;
+		}
+
 		if ( ! $.pethelpPayuResponse ) {
 			e.preventDefault();
 			$( '#pethelp_payu_widget_trigger' ).trigger( 'click' );

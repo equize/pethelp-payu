@@ -74,6 +74,56 @@ abstract class Pethelp_Gateway_PayU_Abstract extends WC_Payment_Gateway {
 		<?php
 	}
 
+	/**
+	 * Whether a verified notification (signature and PayU order id already match) must
+	 * be ignored, so a delayed, duplicated or inconsistent one never changes the order:
+	 * - COMPLETED with an amount or currency other than the PayU order was created with;
+	 * - COMPLETED for an order that is already paid (duplicate);
+	 * - CANCELED / REJECTED for an order that is already paid.
+	 */
+	protected function is_stale_notification( \WC_Order $order, string $payu_status, array $notification ): bool {
+		$payu_order_id = (string) ( $notification['order']['orderId'] ?? '' );
+
+		if ( $payu_status === 'COMPLETED' ) {
+			$expected = (string) $order->get_meta( '_pethelp_payu_total_amount' );
+			if ( $expected === '' ) {
+				$expected = Pethelp_PayU_Cards_API::to_payu_amount( (float) $order->get_total() );
+			}
+
+			$amount   = (string) ( $notification['order']['totalAmount'] ?? '' );
+			$currency = (string) ( $notification['order']['currencyCode'] ?? '' );
+
+			if ( $amount !== $expected || ( $currency !== '' && $currency !== $order->get_currency() ) ) {
+				$this->log( sprintf(
+					'[order #%d]: notyfikacja COMPLETED odrzucona – kwota %s %s, oczekiwano %s %s (PayU Order ID %s).',
+					$order->get_id(), $amount, $currency, $expected, $order->get_currency(), $payu_order_id
+				), [], 'error' );
+				$order->add_order_note( sprintf(
+					__( 'PayU: zignorowano notyfikację COMPLETED – kwota %1$s nie zgadza się ze zleceniem (%2$s, w groszach). Zamówienie nie zostało oznaczone jako opłacone.', 'pethelp-payu-cards' ),
+					$amount,
+					$expected
+				) );
+				return true;
+			}
+
+			if ( $order->is_paid() ) {
+				$this->log( sprintf( '[order #%d]: zduplikowana notyfikacja COMPLETED (PayU Order ID %s) – zamówienie jest już opłacone.', $order->get_id(), $payu_order_id ) );
+				return true;
+			}
+		}
+
+		if ( in_array( $payu_status, [ 'CANCELED', 'REJECTED' ], true ) && $order->is_paid() ) {
+			$this->log( sprintf( '[order #%d]: zignorowano notyfikację %s (PayU Order ID %s) – zamówienie jest już opłacone.', $order->get_id(), $payu_status, $payu_order_id ), [], 'error' );
+			$order->add_order_note( sprintf(
+				__( 'PayU: zignorowano notyfikację %s dla opłaconego zamówienia.', 'pethelp-payu-cards' ),
+				$payu_status
+			) );
+			return true;
+		}
+
+		return false;
+	}
+
 	protected function get_payu_products( \WC_Order $order ): array {
 		$products = [];
 
@@ -155,6 +205,14 @@ abstract class Pethelp_Gateway_PayU_Abstract extends WC_Payment_Gateway {
 	}
 
 	/**
+	 * Message shown to the customer when PayU could not start a payment. The exception
+	 * itself (it may carry a raw PayU API response) goes only to the log and the order note.
+	 */
+	public static function customer_payment_error(): string {
+		return __( 'Nie udało się rozpocząć płatności w PayU. Spróbuj ponownie za chwilę lub wybierz inną metodę płatności.', 'pethelp-payu-cards' );
+	}
+
+	/**
 	 * Log Levels
 	 *
 	 * Description of levels:
@@ -170,6 +228,46 @@ abstract class Pethelp_Gateway_PayU_Abstract extends WC_Payment_Gateway {
 	 * @see @link {https://tools.ietf.org/html/rfc5424}
 	 */
 	protected function log( $message, $context = [], $level = 'debug' ) {
-		$this->logger->log( $level, $message, array_merge( $this->log_ctx, is_array( $context ) ? $context : [] ) );
+		$context = array_map( [ __CLASS__, 'redact' ], is_array( $context ) ? $context : [] );
+
+		$this->logger->log( $level, self::redact( (string) $message ), array_merge( $this->log_ctx, $context ) );
+	}
+
+	/**
+	 * Masks card tokens and buyer data before anything reaches the log (payloads, API
+	 * responses and raw notifications are logged as JSON). Order ids, statuses, amounts,
+	 * decline codes and masked card numbers stay – they are needed for diagnostics.
+	 *
+	 * @param mixed $value
+	 * @return mixed
+	 */
+	public static function redact( $value ) {
+		if ( is_array( $value ) ) {
+			return array_map( [ __CLASS__, 'redact' ], $value );
+		}
+
+		if ( ! is_string( $value ) ) {
+			return $value;
+		}
+
+		// PayU tokens (TOK_ single-use, TOKC_ reusable): prefix and last 4 characters only.
+		$value = preg_replace_callback(
+			'/\b(TOKC?_)([A-Za-z0-9_-]+)/',
+			function ( $match ) {
+				return $match[1] . '***' . substr( $match[2], -4 );
+			},
+			$value
+		);
+
+		// Buyer data in JSON payloads and notifications (also with escaped quotes and
+		// \uXXXX escapes, which json_encode uses for Polish characters).
+		$value = preg_replace(
+			'/(\\\\?"(?:email|phone|firstName|lastName|customerIp)\\\\?"\s*:\s*\\\\?")(?:[^"\\\\]|\\\\{1,2}u[0-9a-fA-F]{4})*(\\\\?")/',
+			'$1***$2',
+			$value
+		);
+
+		// Any other e-mail address.
+		return preg_replace( '/[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/', '***@$1', $value );
 	}
 }

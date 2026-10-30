@@ -127,8 +127,8 @@ body {
                                 <?php echo esc_html( $token['masked_card'] ?: '••••' ); ?>
                             </span>
                             <div class="cc-meta">
-                                <?php if ( ! empty( $current_token['card_brand'] ) ) : ?>
-                                    <?php echo esc_html( $current_token['card_brand'] ); ?> 
+                                <?php if ( ! empty( $token['card_brand'] ) ) : ?>
+                                    <?php echo esc_html( $token['card_brand'] ); ?>
                                     <?php if ( $token['exp_month'] && $token['exp_year'] ) : ?>
                                         -
                                     <?php endif; ?>

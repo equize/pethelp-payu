@@ -80,6 +80,7 @@ class Pethelp_Gateway_PayU_PBL extends Pethelp_Gateway_PayU_Abstract {
 			}
 
 			$order->update_meta_data( '_pethelp_payu_order_id', $result['orderId'] );
+			$order->update_meta_data( '_pethelp_payu_total_amount', $payload['totalAmount'] );
 			$order->update_meta_data( '_pethelp_payu_status', $result['status']['statusCode'] ?? 'PENDING' );
 			$order->save();
 
@@ -99,7 +100,7 @@ class Pethelp_Gateway_PayU_PBL extends Pethelp_Gateway_PayU_Abstract {
 
 		} catch ( Exception $e ) {
 			$this->log( sprintf( 'PBL [order #%d]: błąd – %s', $order_id, $e->getMessage() ), [], 'error' );
-			wc_add_notice( $e->getMessage(), 'error' );
+			wc_add_notice( self::customer_payment_error(), 'error' );
 			$order->add_order_note( 'Błąd PayU Pay by Link: ' . $e->getMessage() );
 			return [ 'result' => 'failure' ];
 		}
@@ -188,7 +189,9 @@ class Pethelp_Gateway_PayU_PBL extends Pethelp_Gateway_PayU_Abstract {
 			$raw_body
 		), [ 'raw_body' => $raw_body ] );
 
-		$this->apply_payu_status( $order, $payu_status, $notification );
+		if ( ! $this->is_stale_notification( $order, $payu_status, $notification ) ) {
+			$this->apply_payu_status( $order, $payu_status, $notification );
+		}
 
 		status_header( 200 );
 		exit( 'OK' );
