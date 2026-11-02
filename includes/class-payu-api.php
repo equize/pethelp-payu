@@ -49,7 +49,6 @@ class Pethelp_PayU_Cards_API {
 		$response = wp_remote_post(
 			$this->api_url . '/pl/standard/user/oauth/authorize',
 			[
-				'sslverify' => false,
 				'timeout'   => 30,
 				'body'      => [
 					'grant_type'    => 'client_credentials',
@@ -80,7 +79,6 @@ class Pethelp_PayU_Cards_API {
 		$response = wp_remote_post(
 			$this->api_url . '/pl/standard/user/oauth/authorize',
 			[
-				'sslverify' => false,
 				'timeout'   => 30,
 				'body'      => [
 					'grant_type'      => 'trusted_merchant',
@@ -113,7 +111,6 @@ class Pethelp_PayU_Cards_API {
 			$this->api_url . '/api/v2_1/orders',
 			[
 				'redirection' => 0,
-				'sslverify'   => false,
 				'timeout'     => 45,
 				'headers'     => [
 					'Content-Type'  => 'application/json',
@@ -146,7 +143,6 @@ class Pethelp_PayU_Cards_API {
 			$this->api_url . '/api/v2_1/orders/' . rawurlencode( $payu_order_id ),
 			[
 				'redirection' => 0,
-				'sslverify'   => false,
 				'timeout'     => 30,
 				'headers'     => [
 					'Authorization' => 'Bearer ' . $bearer,
@@ -157,6 +153,38 @@ class Pethelp_PayU_Cards_API {
 		$this->assert_no_wp_error( $response, 'get_order' );
 
 		return json_decode( wp_remote_retrieve_body( $response ), true ) ?? [];
+	}
+
+	/**
+	 * Cancels a PayU order that has not been paid yet, so its payment link stops working.
+	 * PayU refuses it for a COMPLETED order.
+	 *
+	 * @throws Exception
+	 */
+	public function cancel_order( string $payu_order_id ): void {
+		$bearer   = $this->get_bearer();
+		$response = wp_remote_request(
+			$this->api_url . '/api/v2_1/orders/' . rawurlencode( $payu_order_id ),
+			[
+				'method'      => 'DELETE',
+				'redirection' => 0,
+				'timeout'     => 30,
+				'headers'     => [
+					'Authorization' => 'Bearer ' . $bearer,
+				],
+			]
+		);
+
+		$this->assert_no_wp_error( $response, 'cancel_order' );
+
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( $code !== 200 ) {
+			$code_literal = $body['status']['codeLiteral'] ?? '';
+			$msg          = $body['status']['statusDesc'] ?? ( $code_literal ?: 'Nieznany błąd PayU' );
+			throw new Pethelp_PayU_Cards_Exception( sprintf( 'PayU cancel (HTTP %d): %s', $code, $msg ), $code_literal );
+		}
 	}
 
 	/**
@@ -183,7 +211,6 @@ class Pethelp_PayU_Cards_API {
 			$this->api_url . '/api/v2_1/paymethods',
 			[
 				'redirection' => 0,
-				'sslverify'   => false,
 				'timeout'     => 30,
 				'headers'     => [
 					'Authorization' => 'Bearer ' . $bearer,
@@ -231,7 +258,6 @@ class Pethelp_PayU_Cards_API {
 			$this->api_url . '/api/v2_1/orders/' . rawurlencode( $payu_order_id ) . '/refunds',
 			[
 				'redirection' => 0,
-				'sslverify'   => false,
 				'timeout'     => 30,
 				'headers'     => [
 					'Content-Type'  => 'application/json',
